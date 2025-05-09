@@ -176,23 +176,42 @@ load_embed_and_head = False
 # save_figs = True
 # load_embed_and_head = False
 
-# gc_gns
-exp_date = "2025-05-08_21-48-37_noINJ_noAGC_yesGNS_yesGC"
-exp_date = "2025-05-08_23-11-35_yesINJ0.01_noAGC_yesGNS_yesGC"
+# # gc_gns
+# exp_date = "2025-05-08_21-48-37_noINJ_noAGC_yesGNS_yesGC"
+# exp_date = "2025-05-08_23-11-35_yesINJ0.01_noAGC_yesGNS_yesGC"
+#
+# # grad_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_4_llama_60m_none_AdamWGradientInjection_grads.h5"
+# grad_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_c4_llama_60m_none_MuonGradientInjection_grads.h5"
+# loss_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_c4_llama_60m_none_loss.npy"
+# model_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/model_layers.json"
+# exp_info_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_c4_llama_60m_none_grad_injection_muon.json"
+# thresh = 5#50
+# x_limit_ini = 0
+# x_limit_end = 700#25 #400
+# max_traj = 100
+# range_xs_spike_detection = 10
+# show_figs = True
+# save_figs = True
+# load_embed_and_head = False
 
-# grad_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_4_llama_60m_none_AdamWGradientInjection_grads.h5"
-grad_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_c4_llama_60m_none_MuonGradientInjection_grads.h5"
-loss_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_c4_llama_60m_none_loss.npy"
-model_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/model_layers.json"
-exp_info_path = f"logs/gc_gns_c4_llama_60m_none/{exp_date}/gc_gns_c4_llama_60m_none_grad_injection_muon.json"
+# gns_adamAndMuon_c4_llama_60m_none
+exp_date = "2025-05-09_11-36-42_noINJ_noAGC_yesGNS_noGC"
+exp_date = "2025-05-09_13-39-54_yesINJ0.01_noAGC_yesGNS_noGC"
+exp_date = "2025-05-09_15-32-54_yesINJ0.05_noAGC_yesGNS_noGC"
+
+# grad_path = f"logs/gns_adamAndMuon_c4_llama_60m_none/{exp_date}/gns_adamAndMuon_c4_llama_60m_none_AdamWGradientInjection_grads.h5"
+grad_path = f"logs/gns_adamAndMuon_c4_llama_60m_none/{exp_date}/gns_adamAndMuon_c4_llama_60m_none_MuonGradientInjection_grads.h5"
+loss_path = f"logs/gns_adamAndMuon_c4_llama_60m_none/{exp_date}/gns_adamAndMuon_c4_llama_60m_none_loss.npy"
+model_path = f"logs/gns_adamAndMuon_c4_llama_60m_none/{exp_date}/model_layers.json"
+exp_info_path = f"logs/gns_adamAndMuon_c4_llama_60m_none/{exp_date}/gns_adamAndMuon_c4_llama_60m_none_grad_injection_muon.json"
 thresh = 5#50
 x_limit_ini = 0
-x_limit_end = 700#25 #400
+x_limit_end = 550 #700#25 #400
 max_traj = 100
 range_xs_spike_detection = 10
 show_figs = True
 save_figs = True
-load_embed_and_head = False
+load_embed_and_head = True #False
 
 
 # # 130M
@@ -455,6 +474,12 @@ with h5py.File(grad_path, "r") as grad_data_file:
             exit()
         else:
 
+            try:
+                grad_data_gns = grad_data_file[layer_name + '_gns'][x_limit_ini:x_limit_end]
+            except KeyError as e:
+                print(f"{layer_name}_gns not found in {grad_path}!")
+                continue
+
             fig = plt.figure(num=None, figsize=(10, 10), dpi=120, facecolor='w', edgecolor='k')
             fig.suptitle(exp_date.replace("_", " ") + " " +
                          model_name +
@@ -465,7 +490,8 @@ with h5py.File(grad_path, "r") as grad_data_file:
                          ", p: " + str(exp_info["elements"]) +
                          ", layers: " + str(exp_info["layer_number"]) +
                          f"\nmin(loss): {llama_loss.min():.6f}")
-            subfig = fig.add_subplot(2, 1, 1)
+
+            subfig = fig.add_subplot(3, 1, 1)
             subfig.set_title(f"{layer_idx}: {layer_name}")
             subfig.plot(range(x_limit_ini, x_limit_end), llama_loss)
             subfig.grid(True)
@@ -489,7 +515,7 @@ with h5py.File(grad_path, "r") as grad_data_file:
             #               colors='red', linestyles='dashed', linewidths=1)
 
 
-            subfig = fig.add_subplot(2, 1, 2)
+            subfig = fig.add_subplot(3, 1, 2)
             subfig.set_title(f"# of trajectories with spike: {true_indices_detach[1].shape[0]}"
                              f" in {len(steps_with_spike)} steps"
                              f" - max(times): {max_spikes.max():.2f}"
@@ -520,6 +546,19 @@ with h5py.File(grad_path, "r") as grad_data_file:
             #               colors='green', linestyles='dashed', linewidths=1)
             # subfig.vlines(x=spikes_xs_end, ymin=ymin, ymax=ymax,
             #               colors='red', linestyles='dashed', linewidths=1)
+
+            subfig = fig.add_subplot(3, 1, 3)
+            subfig.set_title(f"# gns")
+            if grad_data.ndim > 2:
+                grad_data_trajs = grad_data_gns[:, true_indices_detach[1], true_indices_detach[2]]
+            else:
+                grad_data_trajs = grad_data_gns[:, true_indices_detach[1]]
+            # use traj_ids as in grad_data
+            # traj_ids = np.argsort(-np.abs(grad_data_trajs).max(axis=(0)))
+            grad_data_plot = grad_data_trajs[:, traj_ids[:max_traj]]
+            subfig.plot(range(x_limit_ini, x_limit_end), grad_data_plot)
+            subfig.grid(True)
+            subfig.set_xlim(x_limit_ini, x_limit_end)  # Establecer límites en el eje x
 
             fig_path = os.path.join(os.path.dirname(grad_path), f"fig_{layer_idx}_{layer_name.replace('.', '-')}_grads.png")
             if save_figs:

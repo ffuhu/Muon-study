@@ -128,7 +128,7 @@ class MuonGradientInjection(torch.optim.Optimizer):
         self.eps = 1e-8
         self.grad_centering = grad_centering
 
-        if self.grad_norm_scalin_total_T is not None:
+        if self.grad_norm_scaling:
             self.grad_dict_gns = {}
             self.gamma1 = self.grad_norm_scaling_gammas[0]
             self.gamma2 = self.grad_norm_scaling_gammas[1]
@@ -214,7 +214,8 @@ class MuonGradientInjection(torch.optim.Optimizer):
                                                             device=g.device).fill_(self.grad_injection["factor"])
                                 grad_injection[mask] = random_values
                                 g.add_(grad_injection)
-                                print(f"Injecting gradient! param %: {mask.sum()/g.numel():.2f} factor: {self.grad_injection['factor']}")
+                                print(f"Injecting gradient to {p_name}! param %: {mask.sum()/g.numel():.2f} "
+                                      f"factor: {self.grad_injection['factor']}")
                     ############################### grad injection end ###############################
 
                     ############################### grad saving start ###############################

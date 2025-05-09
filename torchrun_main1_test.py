@@ -129,6 +129,9 @@ def parse_args(args):
     # grad centering parameters
     parser.add_argument("--grad_centering", default=False, action="store_true")
 
+    # whether or not to apply the grad methods to Adam or only to Muon
+    parser.add_argument("--grad_apply_on_adam", default=False, action="store_true")
+
     parser.add_argument("--finish_execution_at", type=int, default=151)
 
     args = parser.parse_args(args)
@@ -268,6 +271,7 @@ def main(args):
         return batch
 
     dataset = PreprocessedIterableDataset(data, tokenizer, batch_size=args.batch_size, max_length=args.max_length)
+
     # dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=args.workers)
 
     # for reproducibility
@@ -522,7 +526,17 @@ def main(args):
                                             grad_injection_fn=args.grad_injection_fn,
                                             grad_injection_duration=args.grad_injection_duration,
                                             total_steps=args.num_training_steps,
-                                            grad_save_layers=args.grad_save_layers)
+                                            grad_save_layers=args.grad_save_layers,
+                                            grad_norm_scaling=args.grad_norm_scaling,
+                                            grad_norm_scaling_gammas=(args.grad_norm_scaling_gamma1,
+                                                                      args.grad_norm_scaling_gamma2),
+                                            grad_norm_scalin_total_T=args.num_training_steps,
+                                            grad_norm_scaling_eta_min=args.grad_norm_scaling_eta_min,
+                                            grad_norm_scaling_scale=args.grad_norm_scaling_scale,
+                                            grad_ada_clipping=args.grad_ada_clipping,
+                                            grad_ada_clipping_theta=args.grad_ada_clipping_theta,
+                                            grad_centering=args.grad_centering,
+                                            grad_apply_on_adam=args.grad_apply_on_adam)
         optimizer2 = MuonGradientInjection(muon_params, lr=args.lr_muon, momentum=0.95,
                                            rank=local_rank, world_size=world_size,
                                            name=name,

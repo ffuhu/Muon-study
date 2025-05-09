@@ -101,6 +101,17 @@ class AdamWGradientInjection(Optimizer):
             total_steps=None,
             save_every_N_steps=None,
             grad_save_layers=None,
+            # AdaGN as in https://github.com/TianjinYellow/StableSPAM/blob/master/galore_torch/stablespam.py
+            grad_norm_scaling=False,
+            grad_norm_scaling_gammas=None,
+            grad_norm_scalin_total_T=None,
+            grad_norm_scaling_eta_min=None,
+            grad_norm_scaling_scale=None,
+            # adaclip
+            grad_ada_clipping=False,
+            grad_ada_clipping_theta=None,
+            grad_centering=False,
+            grad_apply_on_adam=False,
     ):
         if not no_deprecation_warning:
             warnings.warn(
@@ -132,6 +143,25 @@ class AdamWGradientInjection(Optimizer):
         self.log_folder = log_folder
         self.save_every_N_steps = save_every_N_steps
         self.grad_save_layers = grad_save_layers
+        self.grad_norm_scaling = grad_norm_scaling
+        self.grad_norm_scaling_gammas = grad_norm_scaling_gammas
+        self.grad_norm_scalin_total_T = grad_norm_scalin_total_T
+        self.grad_norm_scaling_eta_min = grad_norm_scaling_eta_min
+        self.grad_norm_scaling_scale = grad_norm_scaling_scale
+        self.grad_ada_clipping = grad_ada_clipping
+        self.grad_ada_clipping_theta = grad_ada_clipping_theta
+        self.eps = 1e-8
+        self.grad_centering = grad_centering
+        self.grad_apply_on_adam = grad_apply_on_adam
+
+        if self.grad_norm_scaling and self.grad_apply_on_adam:
+            self.grad_dict_gns = {}
+            self.gamma1 = self.grad_norm_scaling_gammas[0]
+            self.gamma2 = self.grad_norm_scaling_gammas[1]
+
+        if self.grad_ada_clipping and self.grad_apply_on_adam:
+            self.grad_dict_agc = {}
+            self.theta = self.grad_ada_clipping_theta
 
         # for gradient injection
         if grad_injection_step:
@@ -146,12 +176,17 @@ class AdamWGradientInjection(Optimizer):
                 'duration': grad_injection_duration[0],
                 'total_steps': total_steps,
                 'grad_save_layers': grad_save_layers,
+                'grad_norm_scaling': grad_norm_scaling,
+                'grad_norm_scaling_gammas': grad_norm_scaling_gammas,
+                'grad_norm_scalin_total_T': grad_norm_scalin_total_T,
+                'grad_norm_scaling_eta_min': grad_norm_scaling_eta_min,
+                'grad_norm_scaling_scale': grad_norm_scaling_scale,
+                'grad_ada_clipping': grad_ada_clipping,
+                'grad_ada_clipping_theta': grad_ada_clipping_theta,
+                'grad_centering': grad_centering,
+                'grad_apply_on_adam': grad_apply_on_adam,
             }
 
-            if grad_injection_fn == "gaussian":
-                self.gauss_values = GaussianFunction(step=self.grad_injection["step"],
-                                                     duration=self.grad_injection["duration"],
-                                                     total_steps=total_steps)
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -175,6 +210,7 @@ class AdamWGradientInjection(Optimizer):
                 if p.grad is None:
                     continue
                 grad = p.grad
+                g_shape = grad.shape
                 if grad.is_sparse:
                     raise RuntimeError("Adam does not support sparse gradients, please consider SparseAdam instead")
                 state = self.state[p]
@@ -194,38 +230,13 @@ class AdamWGradientInjection(Optimizer):
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                 beta1, beta2 = group["betas"]
 
-                # for injecting gradient
-                condition_injecting_gradients = (  # "embed" not in p_name and "head" not in p_name and
-                        self.grad_injection["step"] != -1 and
-                        (p_id in self.grad_injection["layer_number"] or
-                         -1 in self.grad_injection["layer_number"])
-                )
+                ############################### grad injection start ###############################
+                condition_injecting_gradients = (self.grad_injection["step"] != -1
+                                                 and (p_id in self.grad_injection["layer_number"] or
+                                                      -1 in self.grad_injection["layer_number"]))
                 if condition_injecting_gradients:  # inject
 
-                    if self.grad_injection["fn"] == "gaussian":
-                        gauss_mult = self.gauss_values.get_value(state["step"])
-                        # if gauss_mult > 1e-2:
-                        #     grad_injection_factor = self.grad_injection["factor"] * gauss_mult
-                        #     # grad_injection_elements = self.grad_injection['elements']
-                        #     grad_injection = torch.zeros_like(grad)
-                        #     # grad_idxs_injection_i = (torch.rand(grad_injection_elements) * grad.shape[0]).to(torch.int32)
-                        #     # grad_idxs_injection_j = (torch.rand(grad_injection_elements) * grad.shape[1]).to(torch.int32)
-                        #     if self.grad_injection["elements"] < 1.0:
-                        #         grad_idxs_injection_i = self.grad_injection[layer_n]["i"]
-                        #         grad_idxs_injection_j = self.grad_injection[layer_n]["j"]
-                        #         grad_injection[grad_idxs_injection_i, grad_idxs_injection_j] = grad_injection_factor
-                        #     else:
-                        #         grad_injection += grad_injection_factor
-                        #
-                        #     # inject
-                        #     grad = grad + grad_injection
-                        #     print(f"Gradient injected!\t"
-                        #           f"(Elements: {self.grad_injection['elements']}, ",
-                        #           f"Gauss mult: {gauss_mult:.4f}, "
-                        #           f"Mult: {self.grad_injection['factor']}, "
-                        #           f"Gauss*Mult: {gauss_mult * self.grad_injection['factor']:.4f})")
-
-                    elif self.grad_injection["fn"] == "step":
+                    if self.grad_injection["fn"] == "step":
                         d = self.grad_injection["duration"] // 2
                         if self.grad_injection["step"] - d <= state["step"] <= self.grad_injection["step"] + d:
                             grad_injection = torch.zeros_like(grad)
@@ -235,80 +246,94 @@ class AdamWGradientInjection(Optimizer):
                                                         device=grad.device).fill_(self.grad_injection["factor"])
                             grad_injection[mask] = random_values
                             grad.add_(grad_injection)
+                            print(f"Injecting gradient to {p_name}! param %: {mask.sum() / grad.numel():.2f} "
+                                  f"factor: {self.grad_injection['factor']}")
+                ############################### grad injection end ###############################
 
-                    elif self.grad_injection["fn"] == "sign_step":
-                        d = self.grad_injection["duration"] // 2
-                        if self.grad_injection["step"] - d <= state["step"] <= self.grad_injection["step"] + d:
-                            grad_injection = torch.zeros_like(grad)
-                            # if self.grad_injection["elements"] < 1.0:
-                            #     grad_idxs_injection_i = self.grad_injection[layer_n]["i"]
-                            #     grad_idxs_injection_j = self.grad_injection[layer_n]["j"]
-                            #     grad_injection[grad_idxs_injection_i, grad_idxs_injection_j] = self.grad_injection[
-                            #         "factor"]
-                            # else:
-                            #     grad_injection = self.grad_injection["factor"]
-                            grad_injection = torch.zeros_like(grad)
-                            mask = torch.empty_like(grad).uniform_(0, 1) <= self.grad_injection["elements"]
-                            random_values = torch.empty(mask.sum(),
-                                                        dtype=grad.dtype,
-                                                        device=grad.device).fill_(self.grad_injection["factor"])
-                            grad_injection[mask] = random_values
-                            grad.add_(grad_injection).mul_(-1.)
-
-                    elif self.grad_injection["fn"] == "sign":
-                        d = self.grad_injection["duration"] // 2
-                        if self.grad_injection["step"] - d <= state["step"] <= self.grad_injection["step"] + d:
-                            grad_injection = torch.ones_like(grad)
-                            # if self.grad_injection["elements"] < 1.0:
-                            #     grad_idxs_injection_i = self.grad_injection[layer_n]["i"]
-                            #     grad_idxs_injection_j = self.grad_injection[layer_n]["j"]
-                            #     grad_injection[grad_idxs_injection_i, grad_idxs_injection_j] = -1.
-                            # else:
-                            #     grad_injection = -1.
-                            grad_injection = torch.ones_like(grad)
-                            mask = torch.empty_like(grad).uniform_(0, 1) <= self.grad_injection["elements"]
-                            grad_injection[mask] = -1.
-                            grad.mul_(grad_injection)
-
-                    elif self.grad_injection["fn"] == "sum_random_uniform":
-                        d = self.grad_injection["duration"] // 2
-                        if self.grad_injection["step"] - d <= state["step"] <= self.grad_injection["step"] + d:
-                            # if self.grad_injection["elements"] < 1.0:
-                            #     grad_injection = torch.zeros_like(grad)
-                            #     grad_idxs_injection_i = self.grad_injection[layer_n]["i"]
-                            #     grad_idxs_injection_j = self.grad_injection[layer_n]["j"]
-                            #     f = self.grad_injection["factor"]
-                            #     grad_injection_values = torch.empty(grad_idxs_injection_i.shape[0]).uniform_(-f, f)
-                            #     grad_injection[grad_idxs_injection_i, grad_idxs_injection_j] = grad_injection_values
-                            #     grad.add_(grad_injection)
-                            # else:
-                            #     grad_injection = torch.empty_like(grad).uniform_(-self.grad_injection["factor"],
-                            #                                                      self.grad_injection["factor"])
-                            grad_injection = torch.zeros_like(grad)
-                            mask = torch.empty_like(grad).uniform_(0, 1) <= self.grad_injection["elements"]
-                            random_values = torch.empty(mask.sum(),
-                                                        dtype=grad.dtype,
-                                                        device=grad.device).uniform_(-self.grad_injection["factor"],
-                                                                                     self.grad_injection["factor"])
-                            grad_injection[mask] = random_values
-                            grad.add_(grad_injection)
-
-                # save gradients
-                condition_saving_gradients = (p_id in self.grad_injection['grad_save_layers']
-                                              or self.grad_injection["grad_save_layers"] == -1)  #"embed" not in p_name and "head" not in p_name
+                ############################### grad saving start ###############################
+                condition_saving_gradients = (self.log_folder is not None and
+                                              (p_id in self.grad_save_layers or
+                                               self.grad_save_layers == -1))
                 if condition_saving_gradients:
-                    # for gradient spike detection - ALL LAYERS
-                    # p_name = group["name"]
                     if p_name not in self.grad_dict.keys():
                         if state["step"] == 0:
                             optim_name = self.__class__.__name__
-                            print(f"[{optim_name}] Save gradients for layer:\t{p_name}\t{grad.shape}")
-                        # self.grad_dict[layer_n] = []
-                        self.grad_dict[p_name] = np.zeros((self.save_every_N_steps, *grad.shape), dtype=np.float16)
-                    # self.grad_dict[layer_n].append(grad.detach().cpu().to(dtype=torch.float16))
+                            print(f"[{optim_name}] Save gradients for layer:\t{p_name}\t{g_shape}")
+
+                        self.grad_dict[p_name] = np.zeros((self.save_every_N_steps, *g_shape),
+                                                          dtype=np.float16)
+                        if self.grad_norm_scaling and self.grad_apply_on_adam:
+                            self.grad_dict_gns[p_name] = np.zeros_like(self.grad_dict[p_name])
+                        if self.grad_ada_clipping and self.grad_apply_on_adam:
+                            self.grad_dict_agc[p_name] = np.zeros_like(self.grad_dict[p_name])
+                    # save gradients before orthogonalization
                     gradient_step = state["step"] % self.save_every_N_steps
-                    self.grad_dict[p_name][gradient_step] = grad.detach().cpu().float().numpy()
-                # layer_n += 1
+                    self.grad_dict[p_name][gradient_step] = grad.detach().cpu().float().numpy().reshape(g_shape)
+                ############################### grad saving end ###############################
+
+                ############################### grad centering start ###############################
+                condition_grad_centering = self.grad_centering and self.grad_apply_on_adam
+                if condition_grad_centering:
+                    g_dim = tuple(range(1, len(list(grad.size()))))
+                    g_mean = grad.mean(dim=g_dim, keepdim=True)
+                    grad.add_(-g_mean)
+                ############################### grad centering end ###############################
+
+                ############################### grad clipping start ###############################
+                # adaptative spike-aware gradient clipping - AdaClip as in Stable SPAM (https://arxiv.org/pdf/2502.17055)
+                condition_grad_ada_clipping = self.grad_ada_clipping and self.grad_apply_on_adam
+                if condition_grad_ada_clipping:
+                    if "m_max_t" not in state:
+                        state["m_max_t"] = 0
+
+                    m_max_t = state["m_max_t"]
+                    max_gradient = torch.max(grad.abs())
+                    m_max_t = self.theta * m_max_t + (1 - self.theta) * max_gradient
+                    m_max_hat = m_max_t / (1 - self.theta ** (state["step"] + 1))
+
+                    mask = grad.abs() > m_max_hat
+                    if mask.sum() > 0:
+                        grad[mask] = grad[mask] / max_gradient * m_max_hat
+
+                    # to save gradients after adaclip
+                    if condition_saving_gradients:
+                        self.grad_dict_agc[p_name][gradient_step] = grad.detach().cpu().float().numpy().reshape(
+                            g_shape)
+                ############################### grad clipping end ###############################
+
+                ############################### norm scaling start ###############################
+                # adaptative gradient norm scaling - AdaGN as in Stable SPAM (https://arxiv.org/pdf/2502.17055)
+                condition_grad_norm_scaling = self.grad_norm_scaling and self.grad_apply_on_adam
+                if condition_grad_norm_scaling:
+                    scale = 1.
+                    # if self.grad_norm_scalin_total_T is not None and self.grad_norm_scaling_scale is not None:
+                    #     scale = self.warmup.get_dr(state["step"] + 1)
+
+                    if "m_norm_t" not in state:
+                        state["m_norm_t"] = 0
+                        state["v_norm_t"] = 0
+
+                    grad_norm = torch.norm(grad)
+                    m_norm_t, v_norm_t = state["m_norm_t"], state["v_norm_t"]
+                    m_norm_t = self.gamma1 * scale * m_norm_t + (1 - self.gamma1 * scale) * grad_norm
+                    v_norm_t = self.gamma2 * v_norm_t + (1 - self.gamma2) * grad_norm ** 2
+
+                    m_norm_hat = m_norm_t / (1 - (self.gamma1 * scale) ** (state['step'] + 1))
+                    v_norm_hat = v_norm_t / (1 - self.gamma2 ** (state['step'] + 1))
+
+                    c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + self.eps)
+                    # print("grad_norm",grad_norm,"c_norm",c_norm_t,"m_norm_t", m_norm_t,"v_norm_t", v_norm_t)
+
+                    if grad_norm > 0:
+                        grad = grad / grad_norm * c_norm_t
+
+                    state["m_norm_t"], state["v_norm_t"] = m_norm_t, v_norm_t
+
+                    # to save gradients after gradient norm clipping
+                    if condition_saving_gradients:
+                        self.grad_dict_gns[p_name][gradient_step] = grad.detach().cpu().float().numpy().reshape(
+                            g_shape)
+                ############################### norm scaling end ###############################
 
                 # Decay the first and second moment running average coefficient
                 # In-place operations to update the averages at the same time
@@ -326,12 +351,6 @@ class AdamWGradientInjection(Optimizer):
                 # compute norm gradient
                 norm_grad = exp_avg / denom
 
-                # GaLore Projection Back
-                # if "rank" in group:
-                #     norm_grad = state["projector"].project_back(norm_grad)
-                # if "rank" in group:
-                #     mask=torch.rand_like(norm_grad).to(norm_grad.device)>group["rank"]
-                #     norm_grad[mask]=0
                 p.add_(norm_grad, alpha=-step_size)
 
                 # Just adding the square of the weights to the loss function is *not*
@@ -360,15 +379,36 @@ class AdamWGradientInjection(Optimizer):
                     pbar.set_description(f"Saving gradients for {layer_name} ({layer_size:.2f} MB)")
                     # Create a dataset to store the gradients of each layer
                     if layer_name not in f:
+                        # f.create_dataset(layer_name, data=gradient, compression="gzip", chunks=True)
                         dset = f.create_dataset(
                             layer_name,
-                            shape=(0, *layer_shape[1:]),  # Initial shape
-                            maxshape=(None, *layer_shape[1:]),  # Allow expansion along axis 0
+                            shape=(0, *layer_shape[-2:]),  # Initial shape
+                            maxshape=(None, *layer_shape[-2:]),  # Allow expansion along axis 0
                             dtype='float16',
                             compression="gzip"  # Optional compression
                         )
+                        if self.grad_norm_scaling and self.grad_apply_on_adam:
+                            dset_gns = f.create_dataset(
+                                layer_name + '_gns',
+                                shape=(0, *layer_shape[-2:]),  # Initial shape
+                                maxshape=(None, *layer_shape[-2:]),  # Allow expansion along axis 0
+                                dtype='float16',
+                                compression="gzip"  # Optional compression
+                            )
+                        if self.grad_ada_clipping and self.grad_apply_on_adam:
+                            dset_agc = f.create_dataset(
+                                layer_name + '_agc',
+                                shape=(0, *layer_shape[-2:]),  # Initial shape
+                                maxshape=(None, *layer_shape[-2:]),  # Allow expansion along axis 0
+                                dtype='float16',
+                                compression="gzip"  # Optional compression
+                            )
                     else:
                         dset = f[layer_name]
+                        if self.grad_norm_scaling and self.grad_apply_on_adam:
+                            dset_gns = f[layer_name + '_gns']
+                        if self.grad_ada_clipping and self.grad_apply_on_adam:
+                            dset_agc = f[layer_name + '_agc']
 
                     # Resize the dataset to accommodate new data
                     current_size = dset.shape[0]
@@ -377,9 +417,17 @@ class AdamWGradientInjection(Optimizer):
 
                     # Write new data at the end of the dataset
                     dset[current_size:new_size] = self.grad_dict[layer_name]
+                    if self.grad_norm_scaling and self.grad_apply_on_adam:
+                        dset_gns.resize(new_size, axis=0)
+                        dset_gns[current_size:new_size] = self.grad_dict_gns[layer_name]
+                    if self.grad_ada_clipping and self.grad_apply_on_adam:
+                        dset_agc.resize(new_size, axis=0)
+                        dset_agc[current_size:new_size] = self.grad_dict_agc[layer_name]
 
             print("Saved at", gradient_path)
             self.grad_dict = {}
+            self.grad_dict_gns = {}
+            self.grad_dict_agc = {}
 
             # log grad injection params
             grad_info = copy.deepcopy(self.grad_injection)
