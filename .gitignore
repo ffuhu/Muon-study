@@ -1,0 +1,9 @@
+wandb/
+.idea/
+__pycache__/
+_good_bumps_example/
+logs/
+wandb.key
+*.npy
+*.npz
+*.pyc

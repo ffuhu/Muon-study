@@ -1,2 +1,3 @@
-# Muon-study
-Study of the convergence of Muon optimizer
+# Muon study
+
+This repository contains the preliminary results of the study for Muon convergence.
